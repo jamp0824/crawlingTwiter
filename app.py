@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from playwright.async_api import Browser, Error as PlaywrightError, Page, async_playwright
+from playwright.async_api import Browser, Page, async_playwright
 
 
 THREAD_LINK_RE = re.compile(r"^/(@[^/]+/post/[A-Za-z0-9_-]+)")
@@ -112,17 +112,7 @@ async def _run_crawl(profile_url: str, max_scrolls: int, headless: bool) -> tupl
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
 
     async with async_playwright() as pw:
-        try:
-            browser: Browser = await pw.chromium.launch(headless=headless)
-        except PlaywrightError as exc:
-            message = str(exc)
-            if "Executable doesn't exist" in message or "playwright install" in message:
-                raise RuntimeError(
-                    "Playwright 브라우저 실행 파일이 없습니다. "
-                    "현재 활성화된 동일한 Python 환경에서 "
-                    "`python -m playwright install` 을 다시 실행하세요."
-                ) from exc
-            raise
+        browser: Browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(locale="ko-KR")
         page = await context.new_page()
 
@@ -162,14 +152,11 @@ async def crawl_threads(request: CrawlRequest) -> CrawlResponse:
     if "threads.com" not in request.profile_url:
         raise HTTPException(status_code=400, detail="profile_url must be a threads.com URL")
 
-    try:
-        posts, run_id = await _run_crawl(
-            profile_url=request.profile_url,
-            max_scrolls=request.max_scrolls,
-            headless=request.headless,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    posts, run_id = await _run_crawl(
+        profile_url=request.profile_url,
+        max_scrolls=request.max_scrolls,
+        headless=request.headless,
+    )
 
     if not posts:
         raise HTTPException(status_code=404, detail="게시글을 수집하지 못했습니다. 로그인/접근 권한을 확인하세요.")
