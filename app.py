@@ -4,16 +4,14 @@ import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from playwright.async_api import Browser, Error as PlaywrightError, Page, async_playwright
+from playwright.async_api import Browser, Page, async_playwright
 
 
-THREAD_LINK_RE = re.compile(r"^/?@[^/]+/post/[A-Za-z0-9_-]+$")
-THREADS_BASE_URL = "https://www.threads.com"
+THREAD_LINK_RE = re.compile(r"^/(@[^/]+/post/[A-Za-z0-9_-]+)")
 
 
 class CrawlRequest(BaseModel):
@@ -46,9 +44,11 @@ async def _scroll_and_collect_post_links(page: Page, max_scrolls: int) -> list[s
         )
 
         for href in hrefs:
-            normalized = _normalize_post_url(href)
-            if normalized:
-                seen_links.add(normalized)
+            if not href:
+                continue
+            match = THREAD_LINK_RE.match(href)
+            if match:
+                seen_links.add("https://www.threads.com" + match.group(1))
 
         before = len(seen_links)
         await page.mouse.wheel(0, 15000)
@@ -59,9 +59,11 @@ async def _scroll_and_collect_post_links(page: Page, max_scrolls: int) -> list[s
             "elements => elements.map(el => el.getAttribute('href'))",
         )
         for href in hrefs_after:
-            normalized = _normalize_post_url(href)
-            if normalized:
-                seen_links.add(normalized)
+            if not href:
+                continue
+            match = THREAD_LINK_RE.match(href)
+            if match:
+                seen_links.add("https://www.threads.com" + match.group(1))
 
         if len(seen_links) == before:
             stable_rounds += 1
@@ -73,39 +75,8 @@ async def _scroll_and_collect_post_links(page: Page, max_scrolls: int) -> list[s
     return sorted(seen_links)
 
 
-def _normalize_post_url(href: str | None) -> str | None:
-    if not href:
-        return None
-
-    href = href.strip()
-    if not href:
-        return None
-
-    malformed_prefix = f"{THREADS_BASE_URL}@"
-    if href.startswith(malformed_prefix):
-        # 예: https://www.threads.com@freainer/post/xxxx  -> https://www.threads.com/@freainer/post/xxxx
-        href = href.replace(malformed_prefix, f"{THREADS_BASE_URL}/@", 1)
-
-    if href.startswith(THREADS_BASE_URL):
-        parsed = urlparse(href)
-        if parsed.netloc != "www.threads.com":
-            return None
-        candidate_path = parsed.path.lstrip("/")
-        if not THREAD_LINK_RE.match(candidate_path):
-            return None
-        absolute_url = f"{THREADS_BASE_URL}/{candidate_path}"
-    elif THREAD_LINK_RE.match(href):
-        relative = href if href.startswith("/") else f"/{href}"
-        absolute_url = urljoin(THREADS_BASE_URL, relative)
-    else:
-        return None
-
-    return absolute_url.split("?")[0].rstrip("/")
-
-
 async def _extract_post(page: Page, post_url: str) -> dict[str, Any]:
-    safe_post_url = _normalize_post_url(post_url) or post_url
-    await page.goto(safe_post_url, wait_until="domcontentloaded")
+    await page.goto(post_url, wait_until="domcontentloaded")
     await page.wait_for_timeout(1000)
 
     title = await page.title()
@@ -128,7 +99,7 @@ async def _extract_post(page: Page, post_url: str) -> dict[str, Any]:
     )
 
     return {
-        "url": safe_post_url,
+        "url": post_url,
         "title": title,
         "content": content,
         "published_at": timestamp,
@@ -141,17 +112,7 @@ async def _run_crawl(profile_url: str, max_scrolls: int, headless: bool) -> tupl
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
 
     async with async_playwright() as pw:
-        try:
-            browser: Browser = await pw.chromium.launch(headless=headless)
-        except PlaywrightError as exc:
-            message = str(exc)
-            if "Executable doesn't exist" in message or "playwright install" in message:
-                raise RuntimeError(
-                    "Playwright 브라우저 실행 파일이 없습니다. "
-                    "현재 활성화된 동일한 Python 환경에서 "
-                    "`python -m playwright install` 을 다시 실행하세요."
-                ) from exc
-            raise
+        browser: Browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(locale="ko-KR")
         page = await context.new_page()
 
@@ -162,14 +123,13 @@ async def _run_crawl(profile_url: str, max_scrolls: int, headless: bool) -> tupl
 
         posts: list[dict[str, Any]] = []
         for link in post_links:
-            normalized_link = _normalize_post_url(link) or link
             try:
-                post = await _extract_post(page, normalized_link)
+                post = await _extract_post(page, link)
                 posts.append(post)
             except Exception as exc:  # noqa: BLE001
                 posts.append(
                     {
-                        "url": normalized_link,
+                        "url": link,
                         "error": str(exc),
                         "collected_at": datetime.now(timezone.utc).isoformat(),
                     }
@@ -192,14 +152,11 @@ async def crawl_threads(request: CrawlRequest) -> CrawlResponse:
     if "threads.com" not in request.profile_url:
         raise HTTPException(status_code=400, detail="profile_url must be a threads.com URL")
 
-    try:
-        posts, run_id = await _run_crawl(
-            profile_url=request.profile_url,
-            max_scrolls=request.max_scrolls,
-            headless=request.headless,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    posts, run_id = await _run_crawl(
+        profile_url=request.profile_url,
+        max_scrolls=request.max_scrolls,
+        headless=request.headless,
+    )
 
     if not posts:
         raise HTTPException(status_code=404, detail="게시글을 수집하지 못했습니다. 로그인/접근 권한을 확인하세요.")
