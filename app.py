@@ -48,7 +48,7 @@ async def _scroll_and_collect_post_links(page: Page, max_scrolls: int) -> list[s
                 continue
             match = THREAD_LINK_RE.match(href)
             if match:
-                seen_links.add("https://www.threads.com" + match.group(1))
+                seen_links.add("https://www.threads.com/" + match.group(1))
 
         before = len(seen_links)
         await page.mouse.wheel(0, 15000)
@@ -63,7 +63,7 @@ async def _scroll_and_collect_post_links(page: Page, max_scrolls: int) -> list[s
                 continue
             match = THREAD_LINK_RE.match(href)
             if match:
-                seen_links.add("https://www.threads.com" + match.group(1))
+                seen_links.add("https://www.threads.com/" + match.group(1))
 
         if len(seen_links) == before:
             stable_rounds += 1
